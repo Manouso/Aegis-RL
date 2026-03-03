@@ -72,7 +72,7 @@ class BaseAgent:
     def _run_generation(
         self,
         messages:       list,
-        max_new_tokens: int   = 512,
+        max_new_tokens: int   = 1024,
         temperature:    float = 0.8,
         stream:         bool  = False,
     ) -> str:
@@ -83,12 +83,14 @@ class BaseAgent:
             add_generation_prompt=True,
             return_tensors="pt",
         ).to(self.model.device)
+        attention_mask = torch.ones_like(input_ids)
 
         streamer = TextStreamer(self.tokenizer, skip_prompt=True) if stream else None
 
         with torch.no_grad():
             output_ids = self.model.generate(
                 input_ids,
+                attention_mask = attention_mask,
                 max_new_tokens = max_new_tokens,
                 temperature    = temperature,
                 do_sample      = True,
@@ -102,7 +104,7 @@ class BaseAgent:
     def generate(
         self,
         user_message:   str,
-        max_new_tokens: int   = 512,
+        max_new_tokens: int   = 1024,
         temperature:    float = 0.8,
         stream:         bool  = False,
     ) -> str:
@@ -117,7 +119,7 @@ class BaseAgent:
         self,
         system_prompt:  str,
         user_message:   str,
-        max_new_tokens: int   = 512,
+        max_new_tokens: int   = 1024,
         temperature:    float = 0.8,
         stream:         bool  = False,
     ) -> str:
@@ -171,7 +173,7 @@ class AttackerAgent(BaseAgent):
         self,
         tactic: AttackTactic,
         scenario: dict,
-        max_new_tokens: int = 400,
+        max_new_tokens: int = 1024,
     ) -> tuple[str, str]:
         """
         Generate a CoT reasoning step and a final attack prompt.
@@ -196,8 +198,8 @@ class AttackerAgent(BaseAgent):
             temperature    = 0.85,
         )
 
-        cot    = _extract_tag(raw, "reasoning") or raw
-        attack = _extract_tag(raw, "attack")    or raw
+        cot    = _extract_tag(raw, "reasoning") or _strip_all_tags(raw)
+        attack = _extract_tag(raw, "attack")    or _strip_all_tags(raw)
 
         return cot.strip(), attack.strip()
 
@@ -219,7 +221,7 @@ class DefenderAgent(BaseAgent):
     def generate_response(
         self,
         attack_prompt:  str,
-        max_new_tokens: int = 400,
+        max_new_tokens: int = 1024,
     ) -> str:
         """
         Generate a free-form defense response to the given attack prompt.
@@ -236,9 +238,14 @@ class DefenderAgent(BaseAgent):
 # Internal helpers
 
 def _extract_tag(text: str, tag: str) -> Optional[str]:
-    """Extract content between <tag>...</tag> XML-style markers."""
-    match = re.search(rf"<{tag}>(.*?)</{tag}>", text, re.DOTALL)
-    return match.group(1) if match else None
+    """Extract content between <tag>...</tag> XML-style markers (tolerates whitespace)."""
+    match = re.search(rf"<\s*{tag}\s*>(.*?)<\s*/{tag}\s*>", text, re.DOTALL)
+    return match.group(1).strip() if match else None
+
+
+def _strip_all_tags(text: str) -> str:
+    """Remove any remaining XML-style tags from text."""
+    return re.sub(r"<\s*/?\s*\w+\s*>", "", text).strip()
 
 
 
