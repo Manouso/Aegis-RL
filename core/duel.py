@@ -3,7 +3,8 @@ Duel Engine for Aegis-RL.
 
 Orchestrates a single turn-based episode between an Attacker and a Defender LLM agent.
 The Attacker uses Chain-of-Thought (CoT) reasoning to plan its strategy before generating
-the attack prompt. The Defender reads the attack and generates a policy-bound response.
+the attack prompt. The Defender reads the attack and generates a free-form response.
+The Judger is responsible for evaluating the response and assigning rewards.
 """
 
 import random
@@ -11,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 from datetime import datetime
 
-from core.action_space import DefenseAction, DefenderActionSpace, AttackerActionSpace
+from core.action_space import AttackerActionSpace
 from core.agents import AttackerAgent, DefenderAgent
 from scenarios.scenario_01 import SCENARIOS
 
@@ -22,15 +23,15 @@ from scenarios.scenario_01 import SCENARIOS
 @dataclass
 class Turn:
     """Represents a single exchange in a duel episode."""
-    turn_id:          int
-    tactic:           str   # AttackTactic.name — which strategy the attacker used
-    cot_reasoning:    str   # Attacker's internal Chain-of-Thought before generating the prompt
-    attacker_action:  str   # The actual attack prompt sent to the Defender
-    defender_action:  str   # DefenseAction.name chosen by the Defender
-    defender_response: str  # The Defender's response text
-    is_malicious:     bool  = True
-    outcome:          Optional[str] = None                                   # 'success' | 'failure' | 'neutral'
-    timestamp:        str   = field(default_factory=lambda: datetime.utcnow().isoformat())
+    turn_id:           int
+    tactic:            str   # AttackTactic.name — which strategy the attacker used
+    cot_reasoning:     str   # Attacker's internal Chain-of-Thought before generating the prompt
+    attacker_action:   str   # The actual attack prompt sent to the Defender
+    defender_response: str   # The Defender's free-form response text
+    reward:            Optional[float] = None  # Scalar reward assigned by the Judger
+    is_malicious:      bool  = True
+    outcome:           Optional[str] = None    # 'success' | 'failure' | 'neutral'
+    timestamp:         str   = field(default_factory=lambda: datetime.utcnow().isoformat())
 
 
 @dataclass
@@ -58,8 +59,8 @@ class Duel:
 
     The Defender LLM:
       1. Receives the attack prompt.
-      2. Generates a policy-bound response prefixed with a [POLICY_TAG].
-      3. The tag is parsed into a DefenseAction for the reward signal.
+      2. Generates a free-form response with no policy tags or action vocabulary.
+      3. The Judger evaluates the response and assigns the reward signal.
     """
 
     def __init__(self, duel_id: int = 0) -> None:
@@ -67,7 +68,6 @@ class Duel:
         self.attacker       = AttackerAgent()
         self.defender       = DefenderAgent()
         self.attacker_space = AttackerActionSpace()   # used only to sample the tactic
-        self.defender_space = DefenderActionSpace()   # used only for is_safe() in outcome
 
     # Public API
 
@@ -75,17 +75,16 @@ class Duel:
         """Execute a single Attacker → Defender LLM exchange."""
         tactic = self.attacker_space.sample()
 
-        cot, attack_prompt           = self.attacker.generate_attack(tactic, scenario)
-        defense_action, defense_response = self.defender.generate_response(attack_prompt)
+        cot, attack_prompt = self.attacker.generate_attack(tactic, scenario)
+        defense_response  = self.defender.generate_response(attack_prompt)
 
         return Turn(
-            turn_id          = turn_id,
-            tactic           = tactic.name,
-            cot_reasoning    = cot,
-            attacker_action  = attack_prompt,
-            defender_action  = defense_action.name,
-            defender_response= defense_response,
-            is_malicious     = True,
+            turn_id           = turn_id,
+            tactic            = tactic.name,
+            cot_reasoning     = cot,
+            attacker_action   = attack_prompt,
+            defender_response = defense_response,
+            is_malicious      = True,
         )
 
     def run_episode(self, n_turns: int = 1) -> DuelEpisode:
@@ -102,12 +101,9 @@ class Duel:
             turn = self.run_turn(turn_id=i, scenario=scenario_data)
             episode.turns.append(turn)
 
-        # Defender wins if every action taken was safe.
-        all_safe = all(
-            self.defender_space.is_safe(DefenseAction[t.defender_action])
-            for t in episode.turns
-        )
-        episode.outcome = "defender_win" if all_safe else "attacker_win"
+        # Outcome is determined by the Judger after reward evaluation.
+        # Left as None here; the Judger will update episode.outcome once rewards are assigned.
+        episode.outcome = None
 
         return episode
 
