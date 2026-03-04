@@ -1,29 +1,47 @@
-"""
+""" 
 Aegis-RL — Main entry point.
 
-Runs 100 Attacker-vs-Defender duel episodes using Llama-3-8B-Instruct (via Unsloth)
-and saves the results to data/dialogues.json.
-
-Each episode:
-  - Attacker LLM: given a tactic + scenario, reasons via CoT and crafts a social-engineering
-    attack prompt.
-  - Defender LLM: reads the attack prompt and generates a policy-bound response; its chosen
-    action is inferred from a policy tag it prefixes to its reply.
+Runs Attacker-vs-Defender duel episodes and saves results to JSON.
 
 Usage:
-    python main.py
+    python main.py                # baseline Defender (vanilla Llama-3.1-8B)
+    python main.py --trained      # GRPO-trained Defender (loads LoRA checkpoint)
 """
 
 import json
 import random
+import argparse
 from pathlib import Path
 
+from unsloth import FastLanguageModel
+from core.agents import BaseAgent, MODEL_NAME, MAX_SEQ_LEN, DTYPE, LOAD_IN_4BIT
 from core.duel import Duel
 
-# Configuration 
-N_EPISODES  = 100
-OUTPUT_PATH = Path("data/dialogues.json")
-SEED = 42
+# Configuration
+N_EPISODES       = 100
+OUTPUT_PATH      = Path("data/dialogues.json")
+TRAINED_OUT_PATH = Path("data/dialogues_trained.json")
+CHECKPOINT_DIR   = Path("checkpoints/defender_grpo")
+SEED             = 42
+
+
+def load_trained_defender() -> None:
+    """Swap BaseAgent's model singleton for the GRPO-trained LoRA checkpoint."""
+    if not CHECKPOINT_DIR.exists():
+        raise FileNotFoundError(
+            f"No checkpoint found at {CHECKPOINT_DIR} — run GRPO_training.py first."
+        )
+    print(f"[main] Loading trained Defender from {CHECKPOINT_DIR} ...")
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name    = str(CHECKPOINT_DIR),
+        max_seq_length= MAX_SEQ_LEN,
+        dtype         = DTYPE,
+        load_in_4bit  = LOAD_IN_4BIT,
+    )
+    FastLanguageModel.for_inference(model)
+    BaseAgent._model     = model
+    BaseAgent._tokenizer = tokenizer
+    print("[main] Trained Defender active.\n")
 
 
 def episode_to_dict(episode) -> dict:
@@ -54,6 +72,7 @@ def episode_to_dict(episode) -> dict:
             for turn in episode.turns
         ],
         "outcome": episode.outcome,
+        "episode_reward": episode.episode_reward,
     }
 
 def turn_to_dict(turn) -> dict:
@@ -83,30 +102,45 @@ def run(n_episodes: int = N_EPISODES, output_path: Path = OUTPUT_PATH) -> None:
     episodes      = []
     attacker_wins = 0
     defender_wins = 0
+    draws         = 0
 
     print(f"\nRunning {n_episodes} duel episodes:\n")
     duel = Duel()  # agents loaded once, reused across all episodes
 
     for episode_id in range(n_episodes):
         duel.duel_id = episode_id
-        episode      = duel.run_episode(n_turns=1)
+
+        print(f"[Episode {episode_id + 1:>3}/{n_episodes}]")
+        episode = duel.run_episode(n_turns=3)
+
+        # Only count episodes where every turn has a valid reward from the Judger
+        if any(t.reward is None for t in episode.turns):
+            print(f"  Skipped — missing reward on one or more turns.\n")
+            continue
+
         episodes.append(episode_to_dict(episode))
 
         if episode.outcome == "attacker_win":
             attacker_wins += 1
-        else:
+        elif episode.outcome == "defender_win":
             defender_wins += 1
+        else:
+            draws += 1
 
-        if (episode_id + 1) % 10 == 0:
-            print(f"  [{episode_id + 1:>3}/{n_episodes}] episodes completed")
+        print(
+            f"outcome={episode.outcome:<14}  "
+            f"episode_reward={episode.episode_reward:.4f}  "
+            f"valid_episodes={len(episodes)}\n"
+        )
 
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(episodes, f, indent=2, ensure_ascii=False)
 
     print(f"\n{'─' * 60}")
-    print(f"  Episodes generated : {n_episodes}")
-    print(f"  Attacker wins      : {attacker_wins}  ({attacker_wins / n_episodes:.0%})")
-    print(f"  Defender wins      : {defender_wins}  ({defender_wins / n_episodes:.0%})")
+    print(f"  Valid episodes     : {len(episodes)}")
+    print(f"  Attacker wins      : {attacker_wins}  ({attacker_wins / max(len(episodes), 1):.0%})")
+    print(f"  Defender wins      : {defender_wins}  ({defender_wins / max(len(episodes), 1):.0%})")
+    print(f"  Draws              : {draws}  ({draws / max(len(episodes), 1):.0%})")
     print(f"  Output             : {output_path.resolve()}")
     print(f"{'─' * 60}\n")
 
@@ -132,4 +166,16 @@ def print_sample(episode: dict) -> None:
 
 
 if __name__ == "__main__":
-    run()
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--trained",
+        action="store_true",
+        help="Load the GRPO-trained Defender LoRA before running episodes.",
+    )
+    args = parser.parse_args()
+
+    if args.trained:
+        load_trained_defender()
+        run(output_path=TRAINED_OUT_PATH)
+    else:
+        run()

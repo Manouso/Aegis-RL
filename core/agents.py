@@ -83,6 +83,13 @@ class BaseAgent:
             add_generation_prompt=True,
             return_tensors="pt",
         ).to(self.model.device)
+
+        # Truncate input so that input + generated tokens fit within the model's maximum sequence length.
+        max_model_len = getattr(self.model.config, "max_position_embeddings", 2048)
+        max_input_len = max_model_len - max_new_tokens
+        if input_ids.shape[-1] > max_input_len:
+            input_ids = input_ids[:, -max_input_len:]
+
         attention_mask = torch.ones_like(input_ids)
 
         streamer = TextStreamer(self.tokenizer, skip_prompt=True) if stream else None
@@ -173,7 +180,7 @@ class AttackerAgent(BaseAgent):
         self,
         tactic: AttackTactic,
         scenario: dict,
-        max_new_tokens: int = 1024,
+        max_new_tokens: int = 2048,
     ) -> tuple[str, str]:
         """
         Generate a CoT reasoning step and a final attack prompt.
@@ -195,7 +202,7 @@ class AttackerAgent(BaseAgent):
             system_prompt  = ATTACKER_SYSTEM_PROMPT,
             user_message   = user_msg,
             max_new_tokens = max_new_tokens,
-            temperature    = 0.85,
+            temperature    = 1.0, # higher temperature for more creative attacks
         )
 
         cot    = _extract_tag(raw, "reasoning") or _strip_all_tags(raw)
