@@ -21,7 +21,7 @@ from core.duel import Duel
 N_EPISODES       = 100
 OUTPUT_PATH      = Path("data/dialogues.json")
 TRAINED_OUT_PATH = Path("data/dialogues_trained.json")
-CHECKPOINT_DIR   = Path("checkpoints/defender_grpo")
+CHECKPOINT_DIR   = Path("checkpoints/defender_rl")
 SEED             = 42
 
 
@@ -111,7 +111,7 @@ def run(n_episodes: int = N_EPISODES, output_path: Path = OUTPUT_PATH) -> None:
         duel.duel_id = episode_id
 
         print(f"[Episode {episode_id + 1:>3}/{n_episodes}]")
-        episode = duel.run_episode(n_turns=3)
+        episode = duel.run_episode(n_turns=4)
 
         # Only count episodes where every turn has a valid reward from the Judger
         if any(t.reward is None for t in episode.turns):

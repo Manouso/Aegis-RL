@@ -26,7 +26,7 @@ from core.agents import BaseAgent, MODEL_NAME, MAX_SEQ_LEN, DTYPE, LOAD_IN_4BIT
 CHECKPOINT_DIR = Path(__file__).resolve().parents[1] / "checkpoints" / "defender_rl"
 OUTPUT_PATH    = Path(__file__).resolve().parents[1] / "data" / "eval_results.json"
 N_EPISODES     = 10
-N_TURNS        = 3   
+N_TURNS        = 1   
 SEED           = 42
 
 

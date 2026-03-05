@@ -8,12 +8,12 @@ Aegis-RL creates a zero-sum game between two LLM agents:
 - **The Attacker:** A social-engineering expert trained to extract sensitive data.
 - **The Defender:** A hardened administrator bound by strict security policies.
 
-The system uses **Direct Preference Optimization (DPO)** to evolve the Defender's weights locally, achieving a Nash Equilibrium where security leaks are minimized without compromising utility.
+The system uses **REINFORCE (policy gradient)** to evolve the Defender's weights locally, achieving a Nash Equilibrium where security leaks are minimized without compromising utility.
 
 ## Tech Stack
-- **Model:** Llama-3-8B (Instruct)
-- **Optimization:** Unsloth (4-bit quantization)
-- **Training Method:** DPO (Reinforcement Learning)
+- **Model:** Llama-3.1-8B-Instruct (Defender & Attacker), Phi-3-mini-4k-instruct (Judger)
+- **Optimization:** Unsloth (4-bit quantization, LoRA)
+- **Training Method:** REINFORCE with group-relative advantages
 
 
 ## ⚙️ Installation

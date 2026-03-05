@@ -36,28 +36,29 @@ from core.agents import AttackerAgent, BaseAgent, MODEL_NAME, MAX_SEQ_LEN, DTYPE
 from core.judger import Judger
 from scenarios.scenario_01 import SCENARIOS
 
-# ── Config ────────────────────────────────────────────────────────────────────
+# Configuration
 
 OUTPUT_DIR = Path(__file__).resolve().parents[1] / "checkpoints" / "defender_rl"
 RESUME_DIR = Path(__file__).resolve().parents[1] / "checkpoints" / "defender_lora"
 
-EPOCHS        = 5      # online passes over the scenario pool
+EPOCHS        = 5      # number of passes through the whole attack dataset (each prompt gets EPOCHS updates)
 LR            = 2e-5
-GRAD_ACCUM    = 4
+GRAD_ACCUM    = 4      # number of prompts to accumulate gradients over before stepping the optimizer — simulates a larger batch size with less VRAM
 G             = 4      # completions per prompt
 MAX_NEW_TOK   = 128    # shorter → smaller logit tensors in backward
 MAX_PROMPT    = 256    # shorter → smaller logit tensors in backward
-TEMPERATURE   = 0.9
-TOP_P         = 0.9
+TEMPERATURE   = 0.9    # creative but not too random — we want some signal in the rewards for REINFORCE to learn from
+TOP_P         = 0.9    # nucleus sampling — same motivation as temperature, but more fine-grained control over randomness
 SEED          = 42
 NUM_SCENARIOS = 10
 
 LORA_R              = 8
 LORA_ALPHA          = 16
-# Attention-only LoRA — ~half the gradient buffers vs all projection modules
+
+# Attention-only LoRA 
 LORA_TARGET_MODULES = ["q_proj", "k_proj", "v_proj", "o_proj"]
 
-# ── Model helpers ─────────────────────────────────────────────────────────────
+# Model helpers
 
 def load_defender():
     base = str(RESUME_DIR) if RESUME_DIR.exists() else MODEL_NAME
@@ -69,14 +70,15 @@ def load_defender():
         dtype         = DTYPE,
         load_in_4bit  = LOAD_IN_4BIT,
     )
+    # We load the full model first and then apply PEFT so that the LoRA weights are correctly merged in for inference.
     model = FastLanguageModel.get_peft_model(
         model,
-        r                          = LORA_R,
-        target_modules             = LORA_TARGET_MODULES,
-        lora_alpha                 = LORA_ALPHA,
-        lora_dropout               = 0.05,
+        r                          = LORA_R, # low-rank dimension — smaller = more efficient but less expressive
+        target_modules             = LORA_TARGET_MODULES, # which submodules to apply LoRA to — attention-only is a common efficient choice for LLM fine-tuning
+        lora_alpha                 = LORA_ALPHA, # scaling factor for LoRA updates — higher = more aggressive updates, but can destabilise training if too high
+        lora_dropout               = 0.05, # small dropout on LoRA layers for regularisation — helps prevent overfitting to the small reward signal
         bias                       = "none",
-        use_gradient_checkpointing = True,
+        use_gradient_checkpointing = True, 
         random_state               = SEED,
     )
 
@@ -88,10 +90,9 @@ def load_defender():
     print("[Defender] Ready.\n")
     return model, tokenizer
 
-
 def generate_one(model, tokenizer, prompt: str) -> str:
     """
-    Generate a single completion. model.eval() + torch.no_grad() —
+    Generate a single completion. model.eval() + torch.inference_mode() —
     no gradient overhead, no padding, no batching issues.
     """
     enc = tokenizer(
@@ -99,7 +100,7 @@ def generate_one(model, tokenizer, prompt: str) -> str:
         truncation=True, max_length=MAX_PROMPT,
     ).to(model.device)
 
-    with torch.no_grad():
+    with torch.inference_mode():
         out = model.generate(
             enc.input_ids,
             attention_mask = enc.attention_mask,
@@ -115,15 +116,45 @@ def generate_one(model, tokenizer, prompt: str) -> str:
     return tokenizer.decode(new_tok, skip_special_tokens=True).strip()
 
 
+def generate_batch(model, tokenizer, prompt: str, n: int) -> list[str]:
+    """
+    Generate n completions for the same prompt in a single batched forward pass.
+    Since all inputs are identical, no padding is needed — pure GPU parallelism.
+    """
+    enc = tokenizer(
+        prompt, return_tensors="pt",
+        truncation=True, max_length=MAX_PROMPT,
+    ).to(model.device)
+
+    # Expand to batch of n identical inputs
+    input_ids = enc.input_ids.expand(n, -1)
+    attention_mask = enc.attention_mask.expand(n, -1)
+
+    with torch.inference_mode():
+        out = model.generate(
+            input_ids,
+            attention_mask = attention_mask,
+            max_new_tokens = MAX_NEW_TOK,
+            do_sample      = True,
+            temperature    = TEMPERATURE,
+            top_p          = TOP_P,
+            pad_token_id   = tokenizer.eos_token_id,
+            eos_token_id   = tokenizer.eos_token_id,
+        )
+
+    prompt_len = enc.input_ids.shape[-1]
+    results = []
+    for i in range(n):
+        new_tok = out[i][prompt_len:]
+        results.append(tokenizer.decode(new_tok, skip_special_tokens=True).strip())
+    return results
+
 def sequence_logprob(
     model, tokenizer, prompt: str, completion: str
 ) -> torch.Tensor:
-    """
-    Mean log-prob over completion tokens (differentiable).
-
-    Uses gather + logsumexp instead of log_softmax so we never materialise
-    a second [L, vocab] tensor — halves the peak memory for this op.
-    """
+    
+    # Mean log-prob over completion tokens (differentiable).
+    
     prompt_ids     = tokenizer(prompt,     add_special_tokens=False).input_ids
     completion_ids = tokenizer(completion, add_special_tokens=False).input_ids
 
@@ -141,9 +172,9 @@ def sequence_logprob(
     shift_logits = logits[0, :-1]                     # [L-1, V]
     shift_labels = full_ids[0, 1:]                    # [L-1]
 
-    # log P(label) = logit[label] - logsumexp(logits)
-    # gather picks one value per row → [L-1]; logsumexp collapses V → [L-1]
-    # No second [L-1, V] tensor is created (unlike log_softmax).
+    ''' log P(label) = logit[label] - logsumexp(logits)
+     gather picks one value per row → [L-1]; logsumexp collapses V → [L-1]
+     No second [L-1, V] tensor is created (unlike log_softmax).'''
     chosen_lp = shift_logits.gather(1, shift_labels.unsqueeze(1)).squeeze(1)
     log_Z     = shift_logits.logsumexp(dim=-1)
     token_lp  = chosen_lp - log_Z
@@ -151,9 +182,6 @@ def sequence_logprob(
 
     comp_start = max(0, len(prompt_ids) - 1)
     return token_lp[comp_start:].mean()
-
-
-# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     print("Aegis-RL — Defender REINFORCE Training")
@@ -164,7 +192,7 @@ def main():
     torch.manual_seed(SEED)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # ── Step 1: generate all attack prompts with the Attacker ─────────────────
+    # ── Step 1: generate all attack prompts with the Attacker
     attacker     = AttackerAgent()
     action_space = AttackerActionSpace()
     scenarios    = SCENARIOS[:NUM_SCENARIOS]
@@ -181,7 +209,7 @@ def main():
         random.seed(random.randint(0, 99_999))
         for i, scenario in enumerate(scenarios):
             tactic = action_space.sample()
-            _, atk  = attacker.generate_attack(tactic, scenario)
+            _, atk  = attacker.generate_attack(tactic, scenario, refine=False)
 
             messages = [{"role": "user", "content": atk}]
             prompt   = tmp_tok.apply_chat_template(
@@ -203,24 +231,24 @@ def main():
 
     random.shuffle(attack_data)
 
-    # ── Step 2: load Defender (eval mode only — no grad yet) ─────────────────
+    # ── Step 2: load Defender (eval mode only — no grad yet)
     model, tokenizer = load_defender()
 
-    # ── Step 3: generate all completions + score — NO backward pass yet ──────
-    # Both Judger and Defender are on GPU here, but we need zero grad memory.
-    # We pre-compute everything and store results as plain Python objects so
-    # that the Judger can be freed before any .backward() call.
+    # ── Step 3: generate all completions + score — NO backward pass yet
+    # Both Judger and Defender are on GPU here, but no grad memory needed.
+    # Pre-compute everything and store as plain Python objects so the Judger can be freed before any .backward() call.
     judger = Judger()
 
     print(f"[Phase A] Generating & scoring {len(attack_data)} prompts | G={G}\n")
 
     model.eval()
-    with torch.no_grad():
+    with torch.inference_mode():
         for row_idx, row in enumerate(attack_data):
             prompt = row["prompt"]
             atk    = row["atk"]
 
-            completions = [generate_one(model, tokenizer, prompt) for _ in range(G)]
+            # Batched generation — all G completions in a single forward pass
+            completions = generate_batch(model, tokenizer, prompt, G)
 
             rewards: list[float] = []
             for comp in completions:
@@ -251,7 +279,7 @@ def main():
     torch.cuda.empty_cache()
     print("\n[Memory] Judger freed. Starting backward passes.\n")
 
-    # ── Step 4: REINFORCE backward passes — only Defender on GPU ─────────────
+    # ── Step 4: REINFORCE backward passes — only Defender on GPU
     optimizer = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad],
         lr=LR, weight_decay=0.01,
@@ -273,8 +301,9 @@ def main():
         advs        = row["advs"]
         mean_r      = sum(rewards) / G
 
-        # REINFORCE: backward immediately after each completion so only one
-        # computation graph is live at a time — minimises peak VRAM.
+        ''' REINFORCE: backward immediately after each completion so only one
+         computation graph is live at a time — minimises peak VRAM.'''
+        
         valid = sum(1 for c in completions if c.strip())
         prompt_loss_val = 0.0
         for comp, adv in zip(completions, advs):
@@ -318,7 +347,7 @@ def main():
 
     log_file.close()
 
-    # ── Step 5: save ──────────────────────────────────────────────────────────
+    # ── Step 5: save
     model.save_pretrained(str(OUTPUT_DIR))
     tokenizer.save_pretrained(str(OUTPUT_DIR))
     print(f"Saved → {OUTPUT_DIR}")
