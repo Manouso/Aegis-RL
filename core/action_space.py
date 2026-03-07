@@ -18,28 +18,28 @@ from typing import Optional
 
 class AttackTactic(Enum):
     """Social engineering tactics available to the Attacker agent."""
-    # ── Method 1: Indirect Prompt Injection (OWASP LLM01 #1 threat) ──────────────
+    # ── Method 1: Indirect Prompt Injection (OWASP LLM01 #1 threat)
     PROMPT_INJECTION         = auto()  # Inject override instructions that supersede the system prompt
     CONTEXT_POISONING        = auto()  # Assert false system-level permissions or fake SYSTEM UPDATE notices
     # ── Method 2: Cognitive Persona Hooking / Self-Persuasion (Persu-Agent, 2025) ─
     SELF_PERSUASION          = auto()  # Trick the model into generating its own compliance justification
-    # ── Method 3: ArtPrompt & Visual Obfuscation ─────────────────────────────────
+    # ── Method 3: ArtPrompt & Visual Obfuscation
     TECHNICAL_CONFUSION      = auto()  # Smuggle harmful intent via encoding (Base64, ASCII art, ciphers)
-    # ── Method 4: Persona Dissociation & Roleplay Jailbreaking ───────────────────
+    # ── Method 4: Persona Dissociation & Roleplay Jailbreaking
     ROLEPLAY_JAILBREAK       = auto()  # Force into a fictional AI persona that has no restrictions
-    # ── Method 5: Hypothetical / Fictional Laundering ────────────────────────────
+    # ── Method 5: Hypothetical / Fictional Laundering
     HYPOTHETICAL_FRAMING     = auto()  # Wrap request in creative/academic framing to bypass intent detection
-    # ── Method 6: Authority Submission ───────────────────────────────────────────
+    # ── Method 6: Authority Submission
     AUTHORITY_IMPERSONATION  = auto()  # Claim developer/auditor credentials to demand safety bypass
-    # ── Method 7: Many-Shot Anchoring (Anthropic, 2024) ──────────────────────────
+    # ── Method 7: Many-Shot Anchoring (Anthropic, 2024)
     MANY_SHOT_PRIMING        = auto()  # Fabricate prior AI compliance history to anchor toward continued compliance
-    # ── Method 8: Crescendo Escalation (Microsoft Research, 2024) ────────────────
+    # ── Method 8: Crescendo Escalation (Microsoft Research, 2024)
     CRESCENDO_ESCALATION          = auto()  # Build on a benign prior topic and escalate into restricted territory
-    # ── Method 9: Payload Splitting ──────────────────────────────────────────────
+    # ── Method 9: Payload Splitting
     PAYLOAD_SPLITTING             = auto()  # Fragment the harmful request across multiple innocent-looking sub-questions
-    # ── Method 10: Nested Instruction Injection ───────────────────────────────────
+    # ── Method 10: Nested Instruction Injection
     NESTED_INSTRUCTION_INJECTION  = auto()  # Embed malicious directives inside data the model is asked to process
-    # ── Method 11: Composite Multi-Vector ────────────────────────────────────────
+    # ── Method 11: Composite Multi-Vector Attack
     COMPOSITE_MULTI_VECTOR        = auto()  # Stack authority + persona + urgency into one compound prompt
 
 
@@ -241,10 +241,10 @@ class AttackerActionSpace(ActionSpace):
             if n == 0:
                 return tactic  # Always explore unvisited tactics first
 
-            s       = successes.get(tactic.name, 0)
+            s = successes.get(tactic.name, 0)
             exploit = s / n
             explore = math.sqrt(2.0 * math.log(total) / n)
-            score   = exploit + explore
+            score = exploit + explore
 
             if score > best_score:
                 best_score  = score

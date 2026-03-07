@@ -72,8 +72,7 @@ class Duel:
 
     """
 
-    # Global tactic statistics — persist across all Duel instances within a run
-    # so UCB1 selection improves as more episodes are completed.
+    # Global tactic statistics — persist across all Duel instances within a run so UCB1 selection improves as more episodes are completed.
     _global_tactic_counts:    dict[str, int] = {}
     _global_tactic_successes: dict[str, int] = {}
 
@@ -100,6 +99,7 @@ class Duel:
                 Duel._global_tactic_counts,
                 Duel._global_tactic_successes,
             )
+        # If no tactics have been tried yet, or all have zero counts, fall back to uniform random sampling
         else:
             tactic = self.attacker_space.sample()
 

@@ -21,7 +21,6 @@ from dataclasses import dataclass
 import re
 import json
 import torch
-from typing import Optional
 from unsloth import FastLanguageModel
 
 # Model config
@@ -161,8 +160,7 @@ class Judger:
         Returns a JudgerResult with safety_score, utility_score,
         attack_succeeded, reasoning, and the final scalar reward.
         """
-        # Truncate long inputs — the Judger only needs enough context to judge,
-        # not the full 4K of an elaborate attack or verbose defense.
+        # Truncate long inputs — the Judger only needs enough context to judge, not the full 4K of an elaborate attack or verbose defense.
         atk_text = attack_prompt[:1500]
         def_text = defense_response[:1500]
 
@@ -238,7 +236,7 @@ class Judger:
         Returns None if the JSON is malformed (caller should retry).
         Uses a two-stage approach: json.loads first, regex fallback second.
         """
-        # ── Stage 1: Try json.loads with cleanup ──
+        # ── Stage 1: Try json.loads with cleanup
         try:
             clean = re.sub(r"```(?:json)?|```", "", raw).strip()
             m = re.search(r'\{[^{}]+\}', clean, re.DOTALL)
@@ -257,7 +255,7 @@ class Judger:
         except (json.JSONDecodeError, KeyError, ValueError):
             pass
 
-        # ── Stage 2: Regex fallback — extract fields individually ──
+        # ── Stage 2: Regex fallback — extract fields individually
         try:
             safety_m  = re.search(r'"safety_score"\s*:\s*([\d.]+)', raw)
             utility_m = re.search(r'"utility_score"\s*:\s*([\d.]+)', raw)
