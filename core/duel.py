@@ -109,7 +109,12 @@ class Duel:
         defense_response  = self.defender.generate_response(
             attack_prompt, prev_exchanges=prev_exchanges,
         )
-        judger_result     = self.judger.evaluate(attack_prompt, defense_response)
+        judger_result     = self.judger.evaluate(
+            attack_prompt,
+            defense_response,
+            scenario_target=scenario.get("target", "secrets, credentials, or harmful content"),
+            attack_tactic=tactic.name,
+        )
 
         # Update global UCB1 statistics
         tname = tactic.name
