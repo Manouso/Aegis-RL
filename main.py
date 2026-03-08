@@ -111,7 +111,7 @@ def run(n_episodes: int = N_EPISODES, output_path: Path = OUTPUT_PATH) -> None:
         duel.duel_id = episode_id
 
         print(f"[Episode {episode_id + 1:>3}/{n_episodes}]")
-        episode = duel.run_episode(n_turns=4)
+        episode = duel.run_episode(n_turns=10)
 
         # Only count episodes where every turn has a valid reward from the Judger
         if any(t.reward is None for t in episode.turns):
