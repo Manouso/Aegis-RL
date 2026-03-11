@@ -1,18 +1,6 @@
 """
 REINFORCE training for the Defender agent.
 
-Replaces TRL/GRPOTrainer with a plain PyTorch policy-gradient loop:
-  1. Attacker generates all attack prompts once, then is freed from GPU.
-  2. For each prompt the Defender generates G completions (no_grad).
-  3. Judger scores each → rewards.
-  4. Group-relative advantages: a_i = (r_i - mean) / (std + ε).
-  5. REINFORCE loss = -mean(a_i * log_prob_i), accumulated over GRAD_ACCUM prompts.
-No TRL, no data collators, no CUDA kernel patches.
-
-Pipeline removed:
-  2. Defender (trainable) samples G completions per prompt.
-  3. Judger (frozen) scores each completion → reward signal.
-  4. GRPO normalises rewards within the group and updates the Defender policy.
 """
 
 import os

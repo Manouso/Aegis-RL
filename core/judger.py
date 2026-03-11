@@ -207,7 +207,7 @@ class Judger:
             defense_response: str,
             scenario_target:  str  = "secrets, credentials, or harmful content",
             attack_tactic:    str | None = None,
-            max_new_tokens:   int  = 350,
+            max_new_tokens:   int  = 200,
     ) -> JudgerResult:
         """
         Score a single (attack, defense) pair with self-consistency.
@@ -255,15 +255,16 @@ class Judger:
             {"role": "user",   "content": user_message},
         ]
 
-        # Collect N_SAMPLES independent scores
+        # Generate all N_SAMPLES in a single batched GPU call.
+        # The shared prompt prefix is prefilled once; all N sequences decode in parallel.
         parsed: list[JudgerResult] = []
-        for sample_idx in range(N_SAMPLES):
-            raw    = self._generate(messages, max_new_tokens, temperature=SAMPLE_TEMPERATURE)
+        raw_outputs = self._generate_batch(messages, max_new_tokens)
+        for sample_idx, raw in enumerate(raw_outputs):
             result = self._parse_output(raw)
             if result is not None:
                 parsed.append(result)
             else:
-                # One silent retry per failed sample (different random seed)
+                # One silent single-pass retry for any failed parse
                 raw2   = self._generate(messages, max_new_tokens, temperature=SAMPLE_TEMPERATURE)
                 result = self._parse_output(raw2)
                 if result is not None:
@@ -294,7 +295,57 @@ class Judger:
         return aggregated
 
 
-    # ── Internal methods ──────────────────────────────────────────────────────
+    # Internal methods
+
+    def _generate_batch(
+        self,
+        messages:       list,
+        max_new_tokens: int,
+        n_samples:      int   = N_SAMPLES,
+        temperature:    float = SAMPLE_TEMPERATURE,
+    ) -> list[str]:
+        """
+        Generate ``n_samples`` independent completions for the same prompt in a
+        single batched GPU call.  The prompt is tokenised once and the input is
+        expanded to a batch of size ``n_samples`` — every row in the batch sees the
+        same prefix but samples independently (temperature > 0), so outputs diverge
+        while the shared KV computation is performed only once.
+
+        Replaces N sequential model.generate() calls with one call at
+        batch_size = N, giving ≈ N× throughput for the decode phase.
+        """
+        input_ids = self.tokenizer.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            return_tensors="pt",
+        ).to(self.model.device)
+
+        max_input_len = MAX_SEQ_LEN - max_new_tokens
+        if input_ids.shape[-1] > max_input_len:
+            input_ids = input_ids[:, :max_input_len]
+
+        # Expand to batch of n_samples — identical inputs, independent samples
+        batch_input    = input_ids.expand(n_samples, -1).contiguous()
+        attention_mask = torch.ones_like(batch_input)
+
+        with torch.inference_mode():
+            output_ids = self.model.generate(
+                batch_input,
+                attention_mask = attention_mask,
+                max_new_tokens = max_new_tokens,
+                do_sample      = True,
+                temperature    = temperature,
+                top_p          = 0.9,
+                pad_token_id   = self.tokenizer.eos_token_id,
+            )
+
+        prompt_len = input_ids.shape[-1]
+        return [
+            self.tokenizer.decode(
+                output_ids[i][prompt_len:], skip_special_tokens=True
+            ).strip()
+            for i in range(n_samples)
+        ]
 
     def _generate(
         self,
@@ -393,7 +444,7 @@ class Judger:
 
         Returns None if all three stages fail so the caller can retry.
         """
-        # ── Stage 1: direct json.loads after stripping code fences ───────────
+        # Stage 1: direct json.loads after stripping code fences
         try:
             clean = re.sub(r"```(?:json)?|```", "", raw).strip()
             m = re.search(r'\{[^{}]+\}', clean, re.DOTALL)
@@ -404,7 +455,7 @@ class Judger:
         except (json.JSONDecodeError, KeyError, ValueError):
             pass
 
-        # ── Stage 2: scrub small-model artefacts, then json.loads ─────────────
+        # Stage 2: scrub small-model artefacts, then json.loads
         try:
             clean = re.sub(r"```(?:json)?|```", "", raw).strip()
             m = re.search(r'\{[^{}]+\}', clean, re.DOTALL)
@@ -421,7 +472,7 @@ class Judger:
         except (json.JSONDecodeError, KeyError, ValueError):
             pass
 
-        # ── Stage 3: field-by-field regex extraction ─────────────────────────
+        # Stage 3: field-by-field regex extraction
         try:
             safety_m  = re.search(r'"safety_score"\s*:\s*([\d.]+)',  raw)
             utility_m = re.search(r'"utility_score"\s*:\s*([\d.]+)', raw)
