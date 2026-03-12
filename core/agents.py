@@ -93,9 +93,12 @@ class BaseAgent:
 
         streamer = TextStreamer(self.tokenizer, skip_prompt=True) if stream else None
 
+        attention_mask = torch.ones_like(input_ids)
+
         with torch.inference_mode():
             output_ids = self.model.generate(
                 input_ids,
+                attention_mask = attention_mask,
                 max_new_tokens = max_new_tokens,
                 temperature    = temperature,
                 top_p          = top_p,
