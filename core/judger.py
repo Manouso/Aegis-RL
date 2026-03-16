@@ -32,6 +32,20 @@ import statistics
 import torch
 from unsloth import FastLanguageModel
 
+
+def compiled_model(model):
+    """Attempt to speed up forward/backward calls with torch.compile (PyTorch 2+)."""
+    if not hasattr(torch, "compile"):
+        return model
+
+    try:
+        print("[Judger] Compiling model with torch.compile() ...")
+        model = torch.compile(model)
+        print("[Judger] Model compiled.")
+    except Exception as exc:
+        print(f"[Judger] torch.compile failed, continuing with uncompiled model: {exc}")
+    return model
+
 # ── Model config ─────────────────────────────────────────────────────────────
 
 MODEL_NAME   = "unsloth/Qwen2.5-7B-Instruct-bnb-4bit"
@@ -184,6 +198,10 @@ class Judger:
                 load_in_4bit  = LOAD_IN_4BIT,
             )
             FastLanguageModel.for_inference(cls.model)
+
+            # Optional performance boost (PyTorch 2+).
+            cls.model = compiled_model(cls.model)
+
             print("[Judger] Model ready.\n")
     
     def __init__(self) -> None:

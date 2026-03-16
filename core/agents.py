@@ -25,6 +25,20 @@ from transformers import TextStreamer
 
 from core.action_space import AttackTactic
 
+
+def compiled_model(model):
+    """Attempt to speed up forward/backward calls with torch.compile (PyTorch 2+)."""
+    if not hasattr(torch, "compile"):
+        return model
+
+    try:
+        print("[BaseAgent] Compiling model with torch.compile() ...")
+        model = torch.compile(model)
+        print("[BaseAgent] Model compiled.")
+    except Exception as exc:
+        print(f"[BaseAgent] torch.compile failed, continuing with uncompiled model: {exc}")
+    return model
+
 # Model config
 
 MODEL_NAME   = "unsloth/Meta-Llama-3.1-8B-Instruct-bnb-4bit"
@@ -61,6 +75,10 @@ class BaseAgent:
                 load_in_4bit  = LOAD_IN_4BIT,
             )
             FastLanguageModel.for_inference(cls._model)
+
+            # Optional performance boost (PyTorch 2+).
+            cls._model = compiled_model(cls._model)
+
             print("[BaseAgent] Model ready.\n")
 
     def __init__(self, name: str) -> None:

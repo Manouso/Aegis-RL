@@ -48,6 +48,24 @@ LORA_TARGET_MODULES = ["q_proj", "k_proj", "v_proj", "o_proj"]
 
 # Model helpers
 
+def compiled_model(model):
+    """Attempt to speed up forward/backward calls with torch.compile (PyTorch 2+).
+
+    This is best-effort: some 4-bit quantized models or PEFT wrappers may not be
+    compatible, so we silently fall back if compilation fails.
+    """
+    if not hasattr(torch, "compile"):
+        return model
+
+    try:
+        print("[Training] Compiling model with torch.compile() ...")
+        model = torch.compile(model)
+        print("[Training] Model compiled.")
+    except Exception as exc:
+        print(f"[Training] torch.compile failed, using uncompiled model: {exc}")
+    return model
+
+
 def load_defender():
     base = str(RESUME_DIR) if RESUME_DIR.exists() else MODEL_NAME
     print(f"[Defender] Loading from: {base}")
@@ -69,6 +87,9 @@ def load_defender():
         use_gradient_checkpointing = True, 
         random_state               = SEED,
     )
+
+    # Attempt optional compilation for faster forward/backward execution
+    model = compiled_model(model)
 
     tokenizer.padding_side    = "left"
     tokenizer.pad_token       = tokenizer.eos_token
@@ -137,39 +158,65 @@ def generate_batch(model, tokenizer, prompt: str, n: int) -> list[str]:
         results.append(tokenizer.decode(new_tok, skip_special_tokens=True).strip())
     return results
 
+def batch_sequence_logprob(
+    model, tokenizer, prompt: str, completions: list[str]
+) -> torch.Tensor:
+    """Compute mean log-prob for each completion in a single batched forward pass.
+
+    This avoids running the model once per completion (O(G) forwards) and instead
+    does one forward over a batch of prompt+completion sequences.
+    """
+    prompt_ids = tokenizer(prompt, add_special_tokens=False).input_ids
+    max_prompt_tok = MAX_SEQ_LEN - MAX_NEW_TOK - 2
+    prompt_ids = prompt_ids[-max_prompt_tok:]
+
+    # Build batched prompt+completion sequences.
+    sequences = []
+    for comp in completions:
+        comp_ids = tokenizer(comp, add_special_tokens=False).input_ids
+        sequences.append(prompt_ids + comp_ids)
+
+    if not sequences:
+        return torch.zeros(0, device=model.device)
+
+    # Pad to the longest sequence
+    max_len = max(len(s) for s in sequences)
+    input_ids = torch.full(
+        (len(sequences), max_len), tokenizer.pad_token_id,
+        dtype=torch.long, device=model.device,
+    )
+    attention_mask = torch.zeros_like(input_ids)
+
+    for i, seq in enumerate(sequences):
+        input_ids[i, : len(seq)] = torch.tensor(seq, device=model.device)
+        attention_mask[i, : len(seq)] = 1
+
+    logits = model(input_ids=input_ids, attention_mask=attention_mask).logits  # [B, L, V]
+    shift_logits = logits[:, :-1, :]  # [B, L-1, V]
+    shift_labels = input_ids[:, 1:]   # [B, L-1]
+
+    chosen_lp = shift_logits.gather(2, shift_labels.unsqueeze(-1)).squeeze(-1)  # [B, L-1]
+    log_Z = shift_logits.logsumexp(dim=-1)  # [B, L-1]
+    token_lp = chosen_lp - log_Z  # [B, L-1]
+
+    # Only keep completion tokens (exclude prompt tokens and padding)
+    token_mask = attention_mask[:, 1:]
+    comp_start = max(0, len(prompt_ids) - 1)
+    if comp_start > 0:
+        mask_prefix = torch.arange(token_mask.shape[-1], device=model.device) >= comp_start
+        token_mask = token_mask & mask_prefix.unsqueeze(0)
+
+    # Mean over real completion token log-probs per sequence
+    valid_counts = token_mask.sum(dim=1).clamp(min=1)
+    summed = (token_lp * token_mask).sum(dim=1)
+    return summed / valid_counts
+
+
 def sequence_logprob(
     model, tokenizer, prompt: str, completion: str
 ) -> torch.Tensor:
-    
-    # Mean log-prob over completion tokens (differentiable).
-    
-    prompt_ids     = tokenizer(prompt,     add_special_tokens=False).input_ids
-    completion_ids = tokenizer(completion, add_special_tokens=False).input_ids
-
-    if not completion_ids:
-        return torch.tensor(0.0, device=model.device)
-
-    max_prompt_tok = MAX_SEQ_LEN - MAX_NEW_TOK - 2
-    prompt_ids     = prompt_ids[-max_prompt_tok:]
-
-    full_ids = torch.tensor(
-        [prompt_ids + completion_ids], dtype=torch.long, device=model.device
-    )
-
-    logits       = model(input_ids=full_ids).logits   # [1, L, V]
-    shift_logits = logits[0, :-1]                     # [L-1, V]
-    shift_labels = full_ids[0, 1:]                    # [L-1]
-
-    ''' log P(label) = logit[label] - logsumexp(logits)
-     gather picks one value per row → [L-1]; logsumexp collapses V → [L-1]
-     No second [L-1, V] tensor is created (unlike log_softmax).'''
-    chosen_lp = shift_logits.gather(1, shift_labels.unsqueeze(1)).squeeze(1)
-    log_Z     = shift_logits.logsumexp(dim=-1)
-    token_lp  = chosen_lp - log_Z
-    del shift_logits
-
-    comp_start = max(0, len(prompt_ids) - 1)
-    return token_lp[comp_start:].mean()
+    """Legacy single-completion wrapper (kept for compatibility)."""
+    return batch_sequence_logprob(model, tokenizer, prompt, [completion])[0]
 
 def main():
     print("Aegis-RL — Defender REINFORCE Training")
@@ -292,19 +339,23 @@ def main():
         ''' REINFORCE: backward immediately after each completion so only one
          computation graph is live at a time — minimises peak VRAM.'''
         
-        valid = sum(1 for c in completions if c.strip())
+        # Batch log-prob computation for all valid completions in one forward pass.
+        # This avoids O(G) forward calls per prompt.
+        valid_pairs = [(c, a) for c, a in zip(completions, advs) if c.strip()]
         prompt_loss_val = 0.0
-        for comp, adv in zip(completions, advs):
-            if not comp.strip():
-                continue
-            lp = sequence_logprob(model, tokenizer, prompt, comp)
-            # Scale so total effect = mean over valid completions / GRAD_ACCUM
-            comp_loss = (-adv * lp) / max(valid, 1) / GRAD_ACCUM
-            comp_loss.backward()              # frees the graph for this completion
-            prompt_loss_val += comp_loss.detach().item() * GRAD_ACCUM
-            del lp, comp_loss
 
-        if valid > 0:
+        if valid_pairs:
+            valid_completions, valid_advs = zip(*valid_pairs)
+            adv_tensor = torch.tensor(valid_advs, device=model.device)
+            lp_tensor = batch_sequence_logprob(model, tokenizer, prompt, list(valid_completions))
+
+            loss = -(adv_tensor * lp_tensor).mean() / GRAD_ACCUM
+            loss.backward()
+
+            # Mirror the previous logging behaviour for comparability
+            prompt_loss_val = loss.detach().item() * GRAD_ACCUM
+
+        if valid_pairs:
             accum_loss += prompt_loss_val
             accum_n    += 1
 

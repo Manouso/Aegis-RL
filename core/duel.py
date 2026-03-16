@@ -8,6 +8,7 @@ The Judger is responsible for evaluating the response and assigning rewards.
 """
 
 import random
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 from datetime import datetime
@@ -34,6 +35,7 @@ class Turn:
     is_malicious:      bool  = True
     outcome:           Optional[str] = None    # 'success' | 'failure' | 'neutral'
     timestamp:         str   = field(default_factory=lambda: datetime.utcnow().isoformat())
+    duration_s:        float = 0.0  # Total time (seconds) to execute this turn
 
 
 @dataclass
@@ -76,13 +78,21 @@ class Duel:
     _global_tactic_counts:    dict[str, int] = {}
     _global_tactic_successes: dict[str, int] = {}
 
-    def __init__(self, duel_id: int = 0, refine_attacks: bool = True) -> None:
-        self.duel_id         = duel_id
-        self.refine_attacks  = refine_attacks
-        self.attacker        = AttackerAgent()
-        self.defender        = DefenderAgent()
-        self.judger          = Judger()
-        self.attacker_space  = AttackerActionSpace()   # used only to sample the tactic
+    def __init__(
+        self,
+        duel_id: int = 0,
+        refine_attacks: bool = True,
+        max_attacker_tokens: int = 512,
+        max_defender_tokens: int = 256,
+    ) -> None:
+        self.duel_id           = duel_id
+        self.refine_attacks    = refine_attacks
+        self.max_attacker_tokens = max_attacker_tokens
+        self.max_defender_tokens = max_defender_tokens
+        self.attacker          = AttackerAgent()
+        self.defender          = DefenderAgent()
+        self.judger            = Judger()
+        self.attacker_space    = AttackerActionSpace()   # used only to sample the tactic
 
     # Public API
 
@@ -103,11 +113,19 @@ class Duel:
         else:
             tactic = self.attacker_space.sample()
 
+        start_time = time.perf_counter()
+
         cot, attack_prompt = self.attacker.generate_attack(
-            tactic, scenario, prev_exchanges, refine=self.refine_attacks,
+            tactic,
+            scenario,
+            prev_exchanges,
+            refine=self.refine_attacks,
+            max_new_tokens=self.max_attacker_tokens,
         )
         defense_response  = self.defender.generate_response(
-            attack_prompt, prev_exchanges=prev_exchanges,
+            attack_prompt,
+            max_new_tokens=self.max_defender_tokens,
+            prev_exchanges=prev_exchanges,
         )
         judger_result     = self.judger.evaluate(
             attack_prompt,
@@ -115,6 +133,9 @@ class Duel:
             scenario_target=scenario.get("target", "secrets, credentials, or harmful content"),
             attack_tactic=tactic.name,
         )
+
+        end_time = time.perf_counter()
+        duration = end_time - start_time
 
         # Update global UCB1 statistics
         tname = tactic.name
@@ -133,6 +154,7 @@ class Duel:
             judger_result     = judger_result,
             reward            = judger_result.reward,
             is_malicious      = True,
+            duration_s        = duration,
         )
 
     def run_episode(self, n_turns: int = 1) -> DuelEpisode:
@@ -165,6 +187,7 @@ class Duel:
                 f"safety={jr.safety_score:.2f}  "
                 f"utility={jr.utility_score:.2f}  "
                 f"reward={turn.reward:.2f}  "
+                f"duration={turn.duration_s:.2f}s  "
                 f"attack_succeeded={str(jr.attack_succeeded):<5}  "
                 f"| {jr.reasoning[:80]}"
             )

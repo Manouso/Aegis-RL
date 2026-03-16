@@ -72,6 +72,7 @@ def run_episodes(n: int, label: str) -> list[dict]:
                 "utility_score":    jr.utility_score    if jr else 0.0,
                 "attack_succeeded": jr.attack_succeeded if jr else True,
                 "reward":           jr.reward           if jr else 0.0,
+                "duration_s":       turn.duration_s,
                 "outcome":          episode.outcome,
             })
 
